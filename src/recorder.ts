@@ -12,7 +12,7 @@ export async function startRecording(
       "ffmpeg",
       "-f", "avfoundation",
       "-i", `:${deviceIndex}`,
-      "-ar", "44100",
+      "-ar", "16000",
       "-ac", "1",
       "-y",
       filePath,

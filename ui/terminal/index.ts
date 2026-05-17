@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { listAudioDevices } from "../../src/devices";
 import { startRecording } from "../../src/recorder";
+import { transcribe, segmentsToText } from "../../src/transcribe";
 
 export async function run() {
   clack.intro(" Audio Recorder ");
@@ -61,6 +62,16 @@ export async function run() {
   stopSpinner.start("Finalizing recording");
   await session.stop();
   stopSpinner.stop(`Saved → ${path.relative(process.cwd(), filePath)}`);
+
+  const transcribeSpinner = clack.spinner();
+  transcribeSpinner.start("Transcribing");
+  const segments = await transcribe(filePath);
+  const text = segmentsToText(segments);
+  const transcriptPath = filePath.replace(/\.wav$/, ".txt");
+  await Bun.write(transcriptPath, text);
+  transcribeSpinner.stop(`Transcription saved → ${path.relative(process.cwd(), transcriptPath)}`);
+
+  clack.note(text || "(no speech detected)", "Transcript");
 
   clack.outro("Done!");
 }
