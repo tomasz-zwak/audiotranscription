@@ -6,6 +6,10 @@ export interface Segment {
   speech: string;
 }
 
+export interface Transcriber {
+  transcribe(filePath: string): Promise<Segment[]>;
+}
+
 const WHISPER_DIR = path.join(
   import.meta.dir,
   "../node_modules/whisper-node/lib/whisper.cpp"

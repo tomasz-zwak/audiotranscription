@@ -3,7 +3,9 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { listAudioDevices } from "../../src/devices";
 import { startRecording } from "../../src/recorder";
-import { transcribe, segmentsToText } from "../../src/transcribe";
+import { segmentsToText, type Transcriber } from "../../src/transcribe";
+import { whisperCppTranscriber } from "../../src/transcribers/whisper-cpp";
+import { lumenWhisperTranscriber } from "../../src/transcribers/lumen-whisper";
 import { pickAudioFile } from "./file-picker";
 
 const RECORDINGS_DIR = path.join(import.meta.dir, "..", "..", "recordings");
@@ -24,14 +26,30 @@ export async function run() {
     process.exit(0);
   }
 
+  const engine = await clack.select({
+    message: "Transcription engine",
+    options: [
+      { value: "whisper-cpp", label: "whisper.cpp", hint: "direct Bun.spawn (default)" },
+      { value: "lumen-whisper", label: "@lumen-labs-dev/whisper-node", hint: "via lumen bindings" },
+    ],
+  });
+
+  if (clack.isCancel(engine)) {
+    clack.outro("Cancelled");
+    process.exit(0);
+  }
+
+  const transcriber: Transcriber =
+    engine === "lumen-whisper" ? lumenWhisperTranscriber : whisperCppTranscriber;
+
   if (mode === "record") {
-    await recordFlow();
+    await recordFlow(transcriber);
   } else {
-    await existingFlow();
+    await existingFlow(transcriber);
   }
 }
 
-async function recordFlow() {
+async function recordFlow(transcriber: Transcriber) {
   const spinner = clack.spinner();
   spinner.start("Detecting audio devices");
 
@@ -61,8 +79,25 @@ async function recordFlow() {
     process.exit(0);
   }
 
+  const recordingName = await clack.text({
+    message: "Recording name",
+    placeholder: `recording-${Date.now()}`,
+    defaultValue: `recording-${Date.now()}`,
+    validate: (v) => {
+      const clean = (v ?? "").trim();
+      if (clean.length === 0) return "Name cannot be empty";
+      if (/[/\\:*?"<>|]/.test(clean)) return "Name contains invalid characters";
+    },
+  });
+
+  if (clack.isCancel(recordingName)) {
+    clack.outro("Cancelled");
+    process.exit(0);
+  }
+
   mkdirSync(RECORDINGS_DIR, { recursive: true });
-  const filePath = path.join(RECORDINGS_DIR, `recording-${Date.now()}.wav`);
+  const safeName = (recordingName as string).trim().replace(/\s+/g, "-");
+  const filePath = path.join(RECORDINGS_DIR, `${safeName}.wav`);
   const session = await startRecording(deviceIndex as number, filePath);
 
   clack.log.step("Recording started — press Enter to stop");
@@ -85,10 +120,10 @@ async function recordFlow() {
   await session.stop();
   stopSpinner.stop(`Saved → ${path.relative(process.cwd(), filePath)}`);
 
-  await transcribeAndDisplay(filePath);
+  await transcribeAndDisplay(filePath, transcriber);
 }
 
-async function existingFlow() {
+async function existingFlow(transcriber: Transcriber) {
   mkdirSync(RECORDINGS_DIR, { recursive: true });
 
   const filePath = await pickAudioFile(RECORDINGS_DIR);
@@ -99,13 +134,15 @@ async function existingFlow() {
   }
 
   clack.log.step(`Selected: ${path.relative(process.cwd(), filePath)}`);
-  await transcribeAndDisplay(filePath);
+  await transcribeAndDisplay(filePath, transcriber);
 }
 
-async function transcribeAndDisplay(filePath: string) {
+async function transcribeAndDisplay(filePath: string, transcriber: Transcriber) {
   const spinner = clack.spinner();
   spinner.start("Transcribing");
-  const segments = await transcribe(filePath);
+  const segments = await transcriber.transcribe(filePath);
+  const rawSegmentsPath = filePath.replace(/\.\w+$/, ".json");
+  await Bun.write(rawSegmentsPath, JSON.stringify(segments));
   const text = segmentsToText(segments);
   const transcriptPath = filePath.replace(/\.\w+$/, ".txt");
   await Bun.write(transcriptPath, text);
