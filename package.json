@@ -2,6 +2,9 @@
   "name": "audiotranscription",
   "module": "index.ts",
   "type": "module",
+  "scripts": {
+    "start:dev": "bun index.ts"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },

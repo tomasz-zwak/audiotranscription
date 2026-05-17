@@ -4,10 +4,34 @@ import path from "node:path";
 import { listAudioDevices } from "../../src/devices";
 import { startRecording } from "../../src/recorder";
 import { transcribe, segmentsToText } from "../../src/transcribe";
+import { pickAudioFile } from "./file-picker";
+
+const RECORDINGS_DIR = path.join(import.meta.dir, "..", "..", "recordings");
 
 export async function run() {
-  clack.intro(" Audio Recorder ");
+  clack.intro(" Audio Transcription ");
 
+  const mode = await clack.select({
+    message: "What would you like to do?",
+    options: [
+      { value: "record", label: "Record now", hint: "capture audio and transcribe" },
+      { value: "existing", label: "Transcribe existing file", hint: "pick an audio file" },
+    ],
+  });
+
+  if (clack.isCancel(mode)) {
+    clack.outro("Cancelled");
+    process.exit(0);
+  }
+
+  if (mode === "record") {
+    await recordFlow();
+  } else {
+    await existingFlow();
+  }
+}
+
+async function recordFlow() {
   const spinner = clack.spinner();
   spinner.start("Detecting audio devices");
 
@@ -37,10 +61,8 @@ export async function run() {
     process.exit(0);
   }
 
-  const recordingsDir = path.join(import.meta.dir, "..", "..", "recordings");
-  mkdirSync(recordingsDir, { recursive: true });
-
-  const filePath = path.join(recordingsDir, `recording-${Date.now()}.wav`);
+  mkdirSync(RECORDINGS_DIR, { recursive: true });
+  const filePath = path.join(RECORDINGS_DIR, `recording-${Date.now()}.wav`);
   const session = await startRecording(deviceIndex as number, filePath);
 
   clack.log.step("Recording started — press Enter to stop");
@@ -63,16 +85,33 @@ export async function run() {
   await session.stop();
   stopSpinner.stop(`Saved → ${path.relative(process.cwd(), filePath)}`);
 
-  const transcribeSpinner = clack.spinner();
-  transcribeSpinner.start("Transcribing");
+  await transcribeAndDisplay(filePath);
+}
+
+async function existingFlow() {
+  mkdirSync(RECORDINGS_DIR, { recursive: true });
+
+  const filePath = await pickAudioFile(RECORDINGS_DIR);
+
+  if (!filePath) {
+    clack.outro("No file selected");
+    process.exit(0);
+  }
+
+  clack.log.step(`Selected: ${path.relative(process.cwd(), filePath)}`);
+  await transcribeAndDisplay(filePath);
+}
+
+async function transcribeAndDisplay(filePath: string) {
+  const spinner = clack.spinner();
+  spinner.start("Transcribing");
   const segments = await transcribe(filePath);
   const text = segmentsToText(segments);
-  const transcriptPath = filePath.replace(/\.wav$/, ".txt");
+  const transcriptPath = filePath.replace(/\.\w+$/, ".txt");
   await Bun.write(transcriptPath, text);
-  transcribeSpinner.stop(`Transcription saved → ${path.relative(process.cwd(), transcriptPath)}`);
+  spinner.stop(`Transcript saved → ${path.relative(process.cwd(), transcriptPath)}`);
 
   clack.note(text || "(no speech detected)", "Transcript");
-
   clack.outro("Done!");
 }
 
