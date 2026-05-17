@@ -1,0 +1,20 @@
+{
+  "name": "audio-transcription-electron",
+  "version": "1.0.0",
+  "description": "Electron UI for Audio Recorder",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "bun run build:main && bun run build:preload && bun run build:renderer",
+    "build:main": "bun build main.ts --target=node --format=cjs --outfile=dist/main.js --external=electron",
+    "build:preload": "bun build preload.ts --target=node --format=cjs --outfile=dist/preload.js --external=electron",
+    "build:renderer": "bun build renderer/app.ts --target=browser --outfile=dist/renderer/app.js && cp renderer/index.html dist/renderer/index.html && cp renderer/style.css dist/renderer/style.css",
+    "start": "bun run build && electron .",
+    "dev": "bun run build && electron . --inspect"
+  },
+  "dependencies": {
+    "electron": "^31.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0"
+  }
+}

@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'" />
+  <title>Audio Recorder</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div class="header-pill">Audio Recorder</div>
+    </header>
+
+    <main>
+      <!-- Loading state -->
+      <section id="state-loading" class="state hidden">
+        <div class="spinner" aria-label="Loading"></div>
+        <p class="status-text">Detecting audio devices…</p>
+      </section>
+
+      <!-- Error state -->
+      <section id="state-error" class="state hidden">
+        <p class="error-icon">!</p>
+        <p id="error-message" class="error-text"></p>
+        <button id="btn-retry" class="btn btn-secondary">Retry</button>
+      </section>
+
+      <!-- Device selection state -->
+      <section id="state-select" class="state hidden">
+        <label for="device-select" class="field-label">Select input device</label>
+        <div class="select-wrapper">
+          <select id="device-select" class="device-select" aria-label="Audio input device"></select>
+          <span class="select-arrow">&#8964;</span>
+        </div>
+        <button id="btn-start" class="btn btn-primary">Start Recording</button>
+      </section>
+
+      <!-- Recording state -->
+      <section id="state-recording" class="state hidden">
+        <div class="recording-indicator">
+          <span class="rec-dot" aria-label="Recording"></span>
+          <span class="rec-label">REC</span>
+        </div>
+        <div id="timer" class="timer" aria-live="polite">00:00</div>
+        <p class="recording-hint">Recording in progress</p>
+        <button id="btn-stop" class="btn btn-danger">Stop Recording</button>
+      </section>
+
+      <!-- Finalizing state -->
+      <section id="state-finalizing" class="state hidden">
+        <div class="spinner" aria-label="Finalizing"></div>
+        <p class="status-text">Finalizing recording…</p>
+      </section>
+
+      <!-- Done state -->
+      <section id="state-done" class="state hidden">
+        <p class="done-icon">&#10003;</p>
+        <p class="done-label">Recording saved</p>
+        <p id="saved-path" class="saved-path"></p>
+        <button id="btn-new" class="btn btn-secondary">New Recording</button>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
