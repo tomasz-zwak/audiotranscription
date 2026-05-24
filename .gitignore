@@ -179,3 +179,4 @@ dist
 # Custom
 recordings
 src/system-audio/capture
+settings.json
