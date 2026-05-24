@@ -2,7 +2,8 @@ import * as clack from "@clack/prompts";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { listAudioDevices } from "../../src/devices";
-import { startRecording } from "../../src/recorder";
+import { startDualRecording } from "../../src/recorder";
+import { buildSystemAudioCapture } from "../../src/system-audio/index";
 import { segmentsToText, type Transcriber } from "../../src/transcribe";
 import { whisperCppTranscriber } from "../../src/transcribers/whisper-cpp";
 import { lumenWhisperTranscriber } from "../../src/transcribers/lumen-whisper";
@@ -12,6 +13,17 @@ const RECORDINGS_DIR = path.join(import.meta.dir, "..", "..", "recordings");
 
 export async function run() {
   clack.intro(" Audio Transcription ");
+
+  // Compile the ScreenCaptureKit helper on first run (takes ~20s)
+  const buildSpinner = clack.spinner();
+  buildSpinner.start("Preparing system audio capture");
+  try {
+    await buildSystemAudioCapture();
+    buildSpinner.stop("System audio capture ready");
+  } catch (err) {
+    buildSpinner.stop("System audio capture unavailable — mic only");
+    clack.log.warn(String(err));
+  }
 
   const mode = await clack.select({
     message: "What would you like to do?",
@@ -79,14 +91,13 @@ async function recordFlow(transcriber: Transcriber) {
     process.exit(0);
   }
 
+  const defaultName = `recording-${Date.now()}`;
   const recordingName = await clack.text({
     message: "Recording name",
-    placeholder: `recording-${Date.now()}`,
-    defaultValue: `recording-${Date.now()}`,
+    placeholder: defaultName,
+    defaultValue: defaultName,
     validate: (v) => {
-      const clean = (v ?? "").trim();
-      if (clean.length === 0) return "Name cannot be empty";
-      if (/[/\\:*?"<>|]/.test(clean)) return "Name contains invalid characters";
+      if (/[/\\:*?"<>|]/.test(v ?? "")) return "Name contains invalid characters";
     },
   });
 
@@ -98,7 +109,7 @@ async function recordFlow(transcriber: Transcriber) {
   mkdirSync(RECORDINGS_DIR, { recursive: true });
   const safeName = (recordingName as string).trim().replace(/\s+/g, "-");
   const filePath = path.join(RECORDINGS_DIR, `${safeName}.wav`);
-  const session = await startRecording(deviceIndex as number, filePath);
+  const session = await startDualRecording(deviceIndex as number, filePath);
 
   clack.log.step("Recording started — press Enter to stop");
 
