@@ -4,7 +4,7 @@ import path from "node:path";
 import { listAudioDevices } from "../../src/devices";
 import { startDualRecording } from "../../src/recorder";
 import { buildSystemAudioCapture } from "../../src/system-audio/index";
-import { segmentsToText, type Transcriber } from "../../src/transcribe";
+import { segmentsToText, mergeSegments, type Transcriber } from "../../src/transcribe";
 import { whisperCppTranscriber } from "../../src/transcribers/whisper-cpp";
 import { lumenWhisperTranscriber } from "../../src/transcribers/lumen-whisper";
 import { pickAudioFile } from "./file-picker";
@@ -129,9 +129,9 @@ async function recordFlow(transcriber: Transcriber) {
   const stopSpinner = clack.spinner();
   stopSpinner.start("Finalizing recording");
   await session.stop();
-  stopSpinner.stop(`Saved → ${path.relative(process.cwd(), filePath)}`);
+  stopSpinner.stop(`Saved → ${safeName}-mic.wav + ${safeName}-sys.wav`);
 
-  await transcribeAndDisplay(filePath, transcriber);
+  await transcribeDualAndDisplay(session.micPath, session.sysPath, safeName, transcriber);
 }
 
 async function existingFlow(transcriber: Transcriber) {
@@ -146,6 +146,35 @@ async function existingFlow(transcriber: Transcriber) {
 
   clack.log.step(`Selected: ${path.relative(process.cwd(), filePath)}`);
   await transcribeAndDisplay(filePath, transcriber);
+}
+
+async function transcribeDualAndDisplay(
+  micPath: string,
+  sysPath: string,
+  baseName: string,
+  transcriber: Transcriber
+) {
+  const spinner = clack.spinner();
+  spinner.start("Transcribing mic + system audio");
+
+  const [micSegments, sysSegments] = await Promise.all([
+    transcriber.transcribe(micPath),
+    transcriber.transcribe(sysPath),
+  ]);
+
+  const segments = mergeSegments(micSegments, sysSegments);
+  const text = segmentsToText(segments);
+  const transcriptPath = path.join(RECORDINGS_DIR, `${baseName}.txt`);
+  const rawPath = path.join(RECORDINGS_DIR, `${baseName}.json`);
+
+  await Promise.all([
+    Bun.write(transcriptPath, text),
+    Bun.write(rawPath, JSON.stringify(segments)),
+  ]);
+
+  spinner.stop(`Transcript saved → ${path.relative(process.cwd(), transcriptPath)}`);
+  clack.note(text || "(no speech detected)", "Transcript");
+  clack.outro("Done!");
 }
 
 async function transcribeAndDisplay(filePath: string, transcriber: Transcriber) {

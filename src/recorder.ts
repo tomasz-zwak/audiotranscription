@@ -1,5 +1,4 @@
-import path from "node:path";
-import { rmSync } from "node:fs";
+import { renameSync } from "node:fs";
 import { startSystemAudioCapture } from "./system-audio/index";
 
 export interface RecordingSession {
@@ -34,23 +33,31 @@ export async function startRecording(
   };
 }
 
+export interface DualRecordingSession {
+  micPath: string;
+  sysPath: string;
+  stop(): Promise<void>;
+}
+
 export async function startDualRecording(
   micDeviceIndex: number,
   outputPath: string
-): Promise<RecordingSession> {
+): Promise<DualRecordingSession> {
   const base = outputPath.replace(/\.wav$/, "");
-  const micPath = `${base}-mic-tmp.wav`;
-  const sysPath = `${base}-sys-tmp.wav`;
+  const micPath = `${base}-mic.wav`;
+  const sysPath = `${base}-sys.wav`;
+  const micTmp = `${base}-mic-tmp.wav`;
+  const sysTmp = `${base}-sys-tmp.wav`;
 
   const [sysSession, micProc] = await Promise.all([
-    startSystemAudioCapture(sysPath),
-    spawnMicRecording(micDeviceIndex, micPath),
+    startSystemAudioCapture(sysTmp),
+    spawnMicRecording(micDeviceIndex, micTmp),
   ]);
 
   return {
-    filePath: outputPath,
+    micPath,
+    sysPath,
     async stop() {
-      // Stop both captures in parallel
       await Promise.all([
         sysSession.stop(),
         (async () => {
@@ -59,14 +66,8 @@ export async function startDualRecording(
           await micProc.exited;
         })(),
       ]);
-
-      // Mix mic + system audio into the final output file
-      await mixAudio(micPath, sysPath, outputPath);
-
-      // Clean up temp files
-      for (const tmp of [micPath, sysPath]) {
-        try { rmSync(tmp); } catch { /* ignore */ }
-      }
+      renameSync(micTmp, micPath);
+      renameSync(sysTmp, sysPath);
     },
   };
 }
@@ -86,27 +87,3 @@ function spawnMicRecording(deviceIndex: number, filePath: string) {
   );
 }
 
-async function mixAudio(micPath: string, sysPath: string, outputPath: string): Promise<void> {
-  const proc = Bun.spawn(
-    [
-      "ffmpeg",
-      "-i", micPath,
-      "-i", sysPath,
-      "-filter_complex", "amix=inputs=2:normalize=0",
-      "-ar", "16000",
-      "-ac", "1",
-      "-y",
-      outputPath,
-    ],
-    { stderr: "pipe", stdout: "pipe", stdin: "ignore" }
-  );
-
-  const [stderr, code] = await Promise.all([
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-
-  if (code !== 0) {
-    throw new Error(`Audio mix failed:\n${stderr}`);
-  }
-}

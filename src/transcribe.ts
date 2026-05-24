@@ -48,3 +48,11 @@ export function parseSegments(output: string): Segment[] {
 export function segmentsToText(segments: Segment[]): string {
   return segments.map((s) => s.speech).join(" ").trim();
 }
+
+export function mergeSegments(a: Segment[], b: Segment[]): Segment[] {
+  const toMs = (t: string): number => {
+    const [h, m, s] = t.split(":").map(Number);
+    return ((h * 60 + m) * 60 + s) * 1000;
+  };
+  return [...a, ...b].sort((x, y) => toMs(x.start) - toMs(y.start));
+}
