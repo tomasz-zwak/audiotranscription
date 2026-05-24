@@ -25,26 +25,29 @@ export async function run() {
     clack.log.warn(String(err));
   }
 
-  const settings = await loadSettings();
-  const transcriber = resolveTranscriber(settings.engine);
+  while (true) {
+    const settings = await loadSettings();
+    const transcriber = resolveTranscriber(settings.engine);
 
-  const mode = await clack.select({
-    message: "What would you like to do?",
-    options: [
-      { value: "record",   label: "Record now",              hint: "capture mic + system audio" },
-      { value: "existing", label: "Transcribe existing file", hint: "pick an audio file" },
-      { value: "settings", label: "Settings",                 hint: settingsHint(settings) },
-    ],
-  });
+    const mode = await clack.select({
+      message: "What would you like to do?",
+      options: [
+        { value: "record",   label: "Record now",              hint: "capture mic + system audio" },
+        { value: "existing", label: "Transcribe existing file", hint: "pick an audio file" },
+        { value: "settings", label: "Settings",                 hint: settingsHint(settings) },
+      ],
+    });
 
-  if (clack.isCancel(mode)) { clack.outro("Cancelled"); process.exit(0); }
+    if (clack.isCancel(mode)) { clack.outro("Cancelled"); process.exit(0); }
 
-  if (mode === "settings") {
-    await settingsFlow(settings);
-  } else if (mode === "record") {
-    await recordFlow(transcriber, settings);
-  } else {
-    await existingFlow(transcriber);
+    if (mode === "settings") {
+      await settingsFlow(settings);
+      // loop back to main menu
+    } else if (mode === "record") {
+      await recordFlow(transcriber, settings);
+    } else {
+      await existingFlow(transcriber);
+    }
   }
 }
 
@@ -128,7 +131,7 @@ async function settingsFlow(settings: Settings) {
 
     if (!clack.isCancel(engine)) {
       await saveSettings({ engine: engine as Engine });
-      clack.outro(`Engine set to ${engine}`);
+      clack.log.success(`Engine set to ${engine}`);
     }
   } else {
     const spinner = clack.spinner();
@@ -145,7 +148,7 @@ async function settingsFlow(settings: Settings) {
     if (!clack.isCancel(deviceIndex)) {
       const chosen = devices.find((d) => d.index === deviceIndex)!;
       await saveSettings({ micDeviceIndex: chosen.index, micDeviceName: chosen.name });
-      clack.outro(`Microphone set to "${chosen.name}"`);
+      clack.log.success(`Microphone set to "${chosen.name}"`);
     }
   }
 }
