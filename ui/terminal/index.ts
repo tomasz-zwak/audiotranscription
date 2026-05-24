@@ -5,6 +5,7 @@ import { listAudioDevices } from "../../src/devices";
 import { startDualRecording } from "../../src/recorder";
 import { buildSystemAudioCapture } from "../../src/system-audio/index";
 import { segmentsToText, mergeSegments, type Transcriber } from "../../src/transcribe";
+import { type Note, noteToRecord, msToOffset } from "../../src/notes";
 import { whisperCppTranscriber } from "../../src/transcribers/whisper-cpp";
 import { lumenWhisperTranscriber } from "../../src/transcribers/lumen-whisper";
 import { loadSettings, saveSettings, type Settings, type Engine } from "../../src/settings";
@@ -62,17 +63,20 @@ async function recordFlow(transcriber: Transcriber, settings: Settings) {
 
   const session = await startDualRecording(micDeviceIndex, filePath);
 
-  clack.log.step("Recording started — press Enter to stop");
+  clack.log.step("Recording  ·  Enter to stop  ·  / for commands");
 
   const startTime = Date.now();
+  const timerState = { paused: false };
+
   const timer = setInterval(() => {
+    if (timerState.paused) return;
     const secs = Math.floor((Date.now() - startTime) / 1000);
     const mm = String(Math.floor(secs / 60)).padStart(2, "0");
     const ss = String(secs % 60).padStart(2, "0");
     process.stdout.write(`\r  ● ${mm}:${ss}`);
   }, 500);
 
-  await waitForEnter();
+  const notes = await recordingLoop(startTime, timerState);
   clearInterval(timer);
   process.stdout.write("\n");
 
@@ -81,7 +85,7 @@ async function recordFlow(transcriber: Transcriber, settings: Settings) {
   await session.stop();
   stopSpinner.stop("Recording saved");
 
-  await transcribeDualAndDisplay(session.micPath, session.sysPath, tempName, transcriber);
+  await transcribeDualAndDisplay(session.micPath, session.sysPath, tempName, transcriber, notes);
   await renameFlow(tempName);
 }
 
@@ -218,7 +222,8 @@ async function transcribeDualAndDisplay(
   micPath: string,
   sysPath: string,
   baseName: string,
-  transcriber: Transcriber
+  transcriber: Transcriber,
+  notes: Note[] = []
 ) {
   const spinner = clack.spinner();
   spinner.start("Transcribing mic + system audio");
@@ -232,10 +237,21 @@ async function transcribeDualAndDisplay(
   const text = segmentsToText(segments);
   const transcriptPath = path.join(RECORDINGS_DIR, `${baseName}.txt`);
 
-  await Promise.all([
+  const writes: Promise<unknown>[] = [
     Bun.write(transcriptPath, text),
     Bun.write(path.join(RECORDINGS_DIR, `${baseName}.json`), JSON.stringify(segments)),
-  ]);
+  ];
+
+  if (notes.length > 0) {
+    writes.push(
+      Bun.write(
+        path.join(RECORDINGS_DIR, `${baseName}.metadata.json`),
+        JSON.stringify(notes.map(noteToRecord), null, 2)
+      )
+    );
+  }
+
+  await Promise.all(writes);
 
   spinner.stop(`Transcript saved → ${path.relative(process.cwd(), transcriptPath)}`);
   clack.note(text || "(no speech detected)", "Transcript");
@@ -267,28 +283,70 @@ function settingsHint(s: Settings): string {
   return parts.join(" · ");
 }
 
-function waitForEnter(): Promise<void> {
-  return new Promise((resolve) => {
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
+async function recordingLoop(
+  startTime: number,
+  timerState: { paused: boolean }
+): Promise<Note[]> {
+  const notes: Note[] = [];
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
 
-    const onData = (key: Buffer) => {
-      const code = key[0];
-      if (code === 0x03) { // Ctrl+C
-        process.stdin.setRawMode(false);
-        process.stdin.pause();
-        process.stdout.write("\n");
-        clack.outro("Cancelled");
-        process.exit(0);
-      }
-      if (code === 0x0d || code === 0x0a) { // Enter
-        process.stdin.removeListener("data", onData);
-        process.stdin.setRawMode(false);
-        process.stdin.pause();
-        resolve();
-      }
-    };
+  while (true) {
+    const key = await nextKeypress();
+    const code = key[0];
 
-    process.stdin.on("data", onData);
+    if (code === 0x03) { // Ctrl+C
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdout.write("\n");
+      clack.outro("Cancelled");
+      process.exit(0);
+    }
+
+    if (code === 0x0d || code === 0x0a) { // Enter — stop
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      return notes;
+    }
+
+    if (code === 0x2f) { // '/' — command palette
+      timerState.paused = true;
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdout.write("\r\x1b[2K"); // clear timer line
+
+      await commandPalette(startTime, notes);
+
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      timerState.paused = false;
+    }
+  }
+}
+
+async function commandPalette(startTime: number, notes: Note[]): Promise<void> {
+  const cmd = await clack.select({
+    message: "/",
+    options: [
+      { value: "note", label: "note", hint: "add a timestamped note" },
+    ],
   });
+
+  if (clack.isCancel(cmd)) return;
+
+  const input = await clack.text({ message: "Note" });
+  if (clack.isCancel(input) || !(input as string).trim()) return;
+
+  const elapsed = Date.now() - startTime;
+  notes.push({
+    recordingOffset: msToOffset(elapsed),
+    wallTime: new Date().toISOString(),
+    text: (input as string).trim(),
+  });
+
+  clack.log.success("Note saved");
+}
+
+function nextKeypress(): Promise<Buffer> {
+  return new Promise((resolve) => process.stdin.once("data", resolve));
 }
