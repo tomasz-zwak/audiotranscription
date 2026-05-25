@@ -1,17 +1,18 @@
 import path from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 
 const SWIFT_SRC = path.join(import.meta.dir, "capture.swift");
 const BINARY = path.join(import.meta.dir, "capture");
 
 export async function buildSystemAudioCapture(): Promise<void> {
-  if (existsSync(BINARY)) return;
+  if (existsSync(BINARY) && statSync(BINARY).mtimeMs >= statSync(SWIFT_SRC).mtimeMs) return;
 
   const proc = Bun.spawn(
     [
       "swiftc",
       "-framework", "ScreenCaptureKit",
       "-framework", "AVFoundation",
+      "-framework", "CoreAudio",
       SWIFT_SRC,
       "-o", BINARY,
     ],
