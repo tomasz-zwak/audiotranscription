@@ -4,7 +4,7 @@ import path from "node:path";
 import { listAudioDevices } from "../../src/devices";
 import { startDualRecording } from "../../src/recorder";
 import { buildSystemAudioCapture } from "../../src/system-audio/index";
-import { segmentsToText, mergeSegments, type Transcriber } from "../../src/transcribe";
+import { segmentsToText, mergeSegments, filterNoise, type Transcriber } from "../../src/transcribe";
 import { type Note, noteToRecord, msToOffset } from "../../src/notes";
 import { whisperCppTranscriber } from "../../src/transcribers/whisper-cpp";
 import { lumenWhisperTranscriber } from "../../src/transcribers/lumen-whisper";
@@ -228,10 +228,16 @@ async function transcribeDualAndDisplay(
   const spinner = clack.spinner();
   spinner.start("Transcribing mic + system audio");
 
-  const [micSegments, sysSegments] = await Promise.all([
+  const sysNormPath = sysPath.replace(/\.wav$/, "-norm.wav");
+  await normalizeForWhisper(sysPath, sysNormPath);
+
+  const [rawMic, rawSys] = await Promise.all([
     transcriber.transcribe(micPath),
-    transcriber.transcribe(sysPath),
-  ]);
+    transcriber.transcribe(sysNormPath),
+  ]).finally(() => Bun.spawn(["rm", "-f", sysNormPath]));
+
+  const micSegments = filterNoise(rawMic).map((s) => ({ ...s, source: "mic" as const }));
+  const sysSegments = filterNoise(rawSys).map((s) => ({ ...s, source: "sys" as const }));
 
   const segments = mergeSegments(micSegments, sysSegments);
   const text = segmentsToText(segments);
@@ -349,4 +355,12 @@ async function commandPalette(startTime: number, notes: Note[]): Promise<void> {
 
 function nextKeypress(): Promise<Buffer> {
   return new Promise((resolve) => process.stdin.once("data", resolve));
+}
+
+async function normalizeForWhisper(input: string, output: string): Promise<void> {
+  const proc = Bun.spawn(
+    ["ffmpeg", "-y", "-i", input, "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", output],
+    { stdout: "ignore", stderr: "ignore", stdin: "ignore" }
+  );
+  await proc.exited;
 }

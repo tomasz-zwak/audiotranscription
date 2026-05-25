@@ -4,6 +4,7 @@ export interface Segment {
   start: string;
   end: string;
   speech: string;
+  source?: "mic" | "sys";
 }
 
 export interface Transcriber {
@@ -45,8 +46,58 @@ export function parseSegments(output: string): Segment[] {
     .filter((s): s is Segment => s !== null && s.speech.length > 0);
 }
 
+// Whisper noise tokens: [BLANK_AUDIO], [MUSIC], [NOISE], [INAUDIBLE], [SILENCE].
+// With -ml 1 these are emitted as individual sub-tokens that reconstruct to the
+// full marker when concatenated. We scan for such runs and drop them.
+const NOISE_RE = /^\[(BLANK_?AUDIO|MUSIC|NOISE|INAUDIBLE|SILENCE)\]$/i;
+
+// Longest known noise token is [BLANK_AUDIO] = 13 chars.
+const MAX_NOISE_LEN = 15;
+
+export function filterNoise(segments: Segment[]): Segment[] {
+  const result: Segment[] = [];
+  let i = 0;
+  while (i < segments.length) {
+    let found = false;
+    let combined = "";
+    for (let j = i; j < segments.length; j++) {
+      combined += segments[j].speech.replace(/\s+/g, "");
+      if (!combined.startsWith("[")) break;
+      if (combined.length > MAX_NOISE_LEN) break;
+      if (NOISE_RE.test(combined)) {
+        i = j + 1; // skip all segments that formed this noise run
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      result.push(segments[i]);
+      i++;
+    }
+  }
+  return result;
+}
+
 export function segmentsToText(segments: Segment[]): string {
-  return segments.map((s) => s.speech).join(" ").trim();
+  // Group consecutive same-source segments into labelled blocks.
+  const blocks: Array<{ source?: "mic" | "sys"; text: string }> = [];
+  for (const seg of segments) {
+    const last = blocks[blocks.length - 1];
+    if (last && last.source === seg.source) {
+      last.text += " " + seg.speech;
+    } else {
+      blocks.push({ source: seg.source, text: seg.speech });
+    }
+  }
+
+  const hasSource = blocks.some((b) => b.source != null);
+
+  if (hasSource) {
+    return blocks
+      .map((b) => `${b.source === "mic" ? "[Mic]" : "[System]"} ${b.text.trim()}`)
+      .join("\n");
+  }
+  return blocks.map((b) => b.text.trim()).join(" ").trim();
 }
 
 export function mergeSegments(a: Segment[], b: Segment[]): Segment[] {

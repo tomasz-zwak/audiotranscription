@@ -10,8 +10,9 @@ export async function buildSystemAudioCapture(): Promise<void> {
   const proc = Bun.spawn(
     [
       "swiftc",
-      "-framework", "CoreAudio",
+      "-framework", "ScreenCaptureKit",
       "-framework", "AVFoundation",
+      "-framework", "CoreAudio",
       SWIFT_SRC,
       "-o", BINARY,
     ],

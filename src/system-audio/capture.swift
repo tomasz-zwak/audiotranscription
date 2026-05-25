@@ -1,174 +1,181 @@
 import Foundation
-import CoreAudio
+import ScreenCaptureKit
 import AVFoundation
+import CoreAudio
 
-@available(macOS 14.2, *)
-class AudioCapture {
+@available(macOS 12.3, *)
+class AudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let outputURL: URL
-    private var tapID: AudioObjectID = kAudioObjectUnknown
-    private var aggregateDeviceID: AudioObjectID = kAudioObjectUnknown
-    private var ioProcID: AudioDeviceIOProcID?
+    private var stream: SCStream?
     private var audioFile: AVAudioFile?
-    private var captureFormat: AVAudioFormat?
-    private let writeQueue = DispatchQueue(label: "audio.write", qos: .userInteractive)
-    private var sigTermSource: DispatchSourceSignal?
+    private var sigTermSource: DispatchSourceSignal?  // must outlive start()
+    private let writeQueue = DispatchQueue(label: "audio.capture.write", qos: .userInteractive)
 
     init(outputPath: String) {
-        outputURL = URL(fileURLWithPath: outputPath)
+        self.outputURL = URL(fileURLWithPath: outputPath)
+        super.init()
     }
 
     func start() async throws {
-        // Create a process tap that captures all-app audio as a stereo mix,
-        // independent of which hardware output device is active.
-        let tapDesc = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
-        let tapStatus = AudioHardwareCreateProcessTap(tapDesc, &tapID)
-        guard tapStatus == noErr else {
-            throw CaptureError.tapFailed(tapStatus)
+        // Request permission if needed (shows System Settings prompt on first run)
+        if !CGPreflightScreenCaptureAccess() {
+            CGRequestScreenCaptureAccess()
+            for _ in 0..<60 {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                if CGPreflightScreenCaptureAccess() { break }
+            }
         }
 
-        // The tap's UUID is used as its identifier in the aggregate device.
-        let tapUID = tapDesc.uuid.uuidString
-
-        // Wrap the tap in a private aggregate device so CoreAudio treats it as
-        // a regular input device we can install an IOProc on.
-        let aggrUID = UUID().uuidString
-        let aggrDesc: [String: Any] = [
-            kAudioAggregateDeviceNameKey as String:         "SystemAudioCapture",
-            kAudioAggregateDeviceUIDKey as String:          aggrUID,
-            kAudioAggregateDeviceIsPrivateKey as String:    true,
-            kAudioAggregateDeviceIsStackedKey as String:    false,
-            kAudioAggregateDeviceTapListKey as String:      [[kAudioSubTapUIDKey as String: tapUID]],
-            kAudioAggregateDeviceTapAutoStartKey as String: false,
-        ]
-        let aggrStatus = AudioHardwareCreateAggregateDevice(aggrDesc as CFDictionary, &aggregateDeviceID)
-        guard aggrStatus == noErr else {
-            throw CaptureError.aggregateFailed(aggrStatus)
+        guard CGPreflightScreenCaptureAccess() else {
+            throw CaptureError.permissionDenied
         }
 
-        // Ask the tap what format its audio is in.
-        var asbd = AudioStreamBasicDescription()
-        var fmtSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        var fmtAddr = AudioObjectPropertyAddress(
-            mSelector: kAudioTapPropertyFormat,
-            mScope:    kAudioObjectPropertyScopeGlobal,
-            mElement:  kAudioObjectPropertyElementMain
-        )
-        let fmtStatus = AudioObjectGetPropertyData(tapID, &fmtAddr, 0, nil, &fmtSize, &asbd)
-        guard fmtStatus == noErr, let format = AVAudioFormat(streamDescription: &asbd) else {
-            throw CaptureError.formatFailed(fmtStatus)
-        }
-        captureFormat = format
-
-        // The tap produces non-interleaved float32. WAV is an interleaved format on disk,
-        // so we tell AVAudioFile to accept non-interleaved data in its processing layer
-        // while writing a standard interleaved PCM file.
-        let fileSettings: [String: Any] = [
-            AVFormatIDKey:              kAudioFormatLinearPCM,
-            AVSampleRateKey:            format.sampleRate,
-            AVNumberOfChannelsKey:      format.channelCount,
-            AVLinearPCMBitDepthKey:     32,
-            AVLinearPCMIsFloatKey:      true,
-            AVLinearPCMIsBigEndianKey:  false,
-            AVLinearPCMIsNonInterleaved: false,
-        ]
-        audioFile = try AVAudioFile(
-            forWriting: outputURL,
-            settings: fileSettings,
-            commonFormat: .pcmFormatFloat32,
-            interleaved: format.isInterleaved
-        )
-
-        // Install an IOProc on the aggregate device. The callback fires on the
-        // CoreAudio I/O thread; we copy the incoming frames and hand them to
-        // writeQueue to avoid file I/O on the real-time thread.
-        var proc: AudioDeviceIOProcID?
-        let procStatus = AudioDeviceCreateIOProcIDWithBlock(&proc, aggregateDeviceID, nil) {
-            [weak self] _, inInputData, _, _, _ in
-            guard let self else { return }
-            self.handleInput(inInputData)
-        }
-        guard procStatus == noErr, let proc else {
-            throw CaptureError.ioProcFailed(procStatus)
-        }
-        ioProcID = proc
-        AudioDeviceStart(aggregateDeviceID, ioProcID)
+        try await startStream()
 
         print("ready")
         fflush(stdout)
 
+        setupOutputDeviceListener()
+
+        // Shut down cleanly on SIGTERM so the WAV file is fully flushed.
+        // Stored as an instance variable so it stays alive after start() returns.
         let sig = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        sig.setEventHandler { [weak self] in self?.shutdown(); exit(0) }
+        sig.setEventHandler { [weak self] in
+            self?.writeQueue.sync { self?.audioFile = nil }
+            exit(0)
+        }
         signal(SIGTERM, SIG_IGN)
         sig.resume()
-        sigTermSource = sig
+        self.sigTermSource = sig
     }
 
-    // Called on the CoreAudio I/O thread — copy quickly, then write on writeQueue.
-    private func handleInput(_ inputData: UnsafePointer<AudioBufferList>) {
-        guard let format = captureFormat else { return }
+    // MARK: - Stream lifecycle
 
-        let bufferCount = Int(inputData.pointee.mNumberBuffers)
-        guard bufferCount > 0 else { return }
-
-        let bytesPerFrame = format.streamDescription.pointee.mBytesPerFrame
-        guard bytesPerFrame > 0 else { return }
-
-        let frameCount = withUnsafePointer(to: inputData.pointee.mBuffers) { ptr in
-            AVAudioFrameCount(ptr.pointee.mDataByteSize / bytesPerFrame)
+    private func startStream() async throws {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        guard let display = content.displays.first else {
+            throw CaptureError.noDisplay
         }
+
+        let scStream = SCStream(filter: makeFilter(display: display), configuration: makeConfig(), delegate: self)
+        stream = scStream
+        try scStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: writeQueue)
+        try await scStream.startCapture()
+    }
+
+    private func restartStream() async {
+        fputs("info: output device changed — restarting capture\n", stderr)
+
+        if let old = stream {
+            stream = nil
+            try? await old.stopCapture()
+        }
+
+        // Brief pause for the OS to settle the new device
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        do {
+            try await startStream()
+        } catch {
+            fputs("error: failed to restart capture: \(error.localizedDescription)\n", stderr)
+        }
+    }
+
+    // MARK: - Output device change listener
+
+    private func setupOutputDeviceListener() {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            DispatchQueue.main
+        ) { [weak self] _, _ in
+            guard let self else { return }
+            Task { await self.restartStream() }
+        }
+    }
+
+    // MARK: - Config helpers
+
+    private func makeConfig() -> SCStreamConfiguration {
+        let config = SCStreamConfiguration()
+        config.capturesAudio = true
+        config.excludesCurrentProcessAudio = false
+        config.width = 2
+        config.height = 2
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+        config.showsCursor = false
+        return config
+    }
+
+    private func makeFilter(display: SCDisplay) -> SCContentFilter {
+        SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+    }
+
+    // MARK: - SCStreamOutput
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .audio,
+              let formatDesc = sampleBuffer.formatDescription else { return }
+        let format = AVAudioFormat(cmAudioFormatDescription: formatDesc)
+
+        let frameCount = AVAudioFrameCount(sampleBuffer.numSamples)
         guard frameCount > 0 else { return }
 
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else { return }
-        buffer.frameLength = frameCount
-
-        // Copy each AudioBuffer into the PCM buffer (handles both interleaved and non-interleaved).
-        withUnsafePointer(to: inputData.pointee.mBuffers) { firstSrc in
-            let srcBuffers = UnsafeBufferPointer<AudioBuffer>(start: firstSrc, count: bufferCount)
-            let dstABL = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
-            for i in 0 ..< min(srcBuffers.count, dstABL.count) {
-                memcpy(dstABL[i].mData, srcBuffers[i].mData, Int(srcBuffers[i].mDataByteSize))
+        if audioFile == nil {
+            guard let file = try? AVAudioFile(forWriting: outputURL, settings: format.settings) else {
+                fputs("error: could not create output file at \(outputURL.path)\n", stderr)
+                return
             }
+            audioFile = file
         }
 
-        writeQueue.async { [weak self] in
-            do { try self?.audioFile?.write(from: buffer) }
-            catch { fputs("error: write failed: \(error)\n", stderr) }
+        guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else { return }
+        pcmBuffer.frameLength = frameCount
+
+        let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer, at: 0, frameCount: Int32(frameCount),
+            into: pcmBuffer.mutableAudioBufferList
+        )
+        guard status == noErr else {
+            fputs("error: CMSampleBufferCopyPCMDataIntoAudioBufferList failed (\(status))\n", stderr)
+            return
+        }
+
+        do {
+            try audioFile?.write(from: pcmBuffer)
+        } catch {
+            fputs("error: audio write failed: \(error)\n", stderr)
         }
     }
 
-    private func shutdown() {
-        if let proc = ioProcID {
-            AudioDeviceStop(aggregateDeviceID, proc)
-            AudioDeviceDestroyIOProcID(aggregateDeviceID, proc)
-            ioProcID = nil
-        }
+    // MARK: - SCStreamDelegate
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        // Ignore errors from streams we intentionally replaced during a restart
+        guard stream === self.stream else { return }
+        fputs("error: stream stopped: \(error.localizedDescription)\n", stderr)
         writeQueue.sync { audioFile = nil }
-        if aggregateDeviceID != kAudioObjectUnknown {
-            AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
-            aggregateDeviceID = kAudioObjectUnknown
-        }
-        if tapID != kAudioObjectUnknown {
-            AudioHardwareDestroyProcessTap(tapID)
-            tapID = kAudioObjectUnknown
-        }
+        exit(1)
     }
+
+    // MARK: - Errors
 
     enum CaptureError: LocalizedError {
-        case tapFailed(OSStatus), aggregateFailed(OSStatus)
-        case formatFailed(OSStatus), ioProcFailed(OSStatus)
+        case permissionDenied, noDisplay
 
         var errorDescription: String? {
             switch self {
-            case .tapFailed(let s):
-                return "Failed to create process tap (OSStatus \(s)). " +
+            case .permissionDenied:
+                return "Screen recording permission not granted. " +
                        "Open System Settings › Privacy & Security › Screen & System Audio Recording " +
                        "and enable access for your terminal."
-            case .aggregateFailed(let s):
-                return "Failed to create aggregate device (OSStatus \(s))."
-            case .formatFailed(let s):
-                return "Failed to query tap audio format (OSStatus \(s))."
-            case .ioProcFailed(let s):
-                return "Failed to install audio IOProc (OSStatus \(s))."
+            case .noDisplay:
+                return "No display found — cannot initialise ScreenCaptureKit."
             }
         }
     }
@@ -176,23 +183,25 @@ class AudioCapture {
 
 // MARK: - Entry point
 
+guard #available(macOS 12.3, *) else {
+    fputs("error: ScreenCaptureKit requires macOS 12.3 or later\n", stderr)
+    exit(1)
+}
+
 guard CommandLine.arguments.count > 1 else {
     fputs("Usage: capture <output.wav>\n", stderr)
     exit(1)
 }
 
-if #available(macOS 14.2, *) {
-    let capture = AudioCapture(outputPath: CommandLine.arguments[1])
-    Task {
-        do {
-            try await capture.start()
-        } catch {
-            fputs("error: \(error.localizedDescription)\n", stderr)
-            exit(1)
-        }
+let capture = AudioCapture(outputPath: CommandLine.arguments[1])
+
+Task {
+    do {
+        try await capture.start()
+    } catch {
+        fputs("error: \(error.localizedDescription)\n", stderr)
+        exit(1)
     }
-    RunLoop.main.run()
-} else {
-    fputs("error: System audio capture requires macOS 14.2 or later\n", stderr)
-    exit(1)
 }
+
+RunLoop.main.run()
