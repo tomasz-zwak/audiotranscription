@@ -14,9 +14,10 @@
 
 - [ ] **[Quick win]** Slash command palette — press `/` during recording to open a command list
 - [ ] **[Quick win]** Timestamped notes — "add note" command lets the user type a note mid-recording; stored with timestamp and attached to the transcript output
+- [ ] **[Quick win]** Speaker tagging — `/speaker <name>` command annotates the current transcription chunk with the speaker's name (e.g. `/speaker Steve`); manual tagging now, automatic diarization later via WhisperX (M2)
 - [ ] **[Medium]** Real-time transcription display — text appears on screen as audio is recorded
 
-**Why first:** No new dependencies, zero infrastructure changes. Notes + slash commands form the interaction model that the future GUI will inherit. Real-time display is the feature users will notice most.
+**Why first:** No new dependencies, zero infrastructure changes. Notes + slash commands form the interaction model that the future GUI will inherit. Speaker tags created here become the training signal for automatic diarization in M2. Real-time display is the feature users will notice most.
 
 ---
 
