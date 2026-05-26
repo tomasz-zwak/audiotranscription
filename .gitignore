@@ -180,3 +180,4 @@ dist
 recordings
 src/system-audio/capture
 settings.json
+!.claude/settings.json

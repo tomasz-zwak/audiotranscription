@@ -1,4 +1,4 @@
-import { renameSync } from "node:fs";
+import { renameSync, existsSync } from "node:fs";
 import { startSystemAudioCapture } from "./system-audio/index";
 
 export interface RecordingSession {
@@ -26,9 +26,7 @@ export async function startRecording(
   return {
     filePath,
     async stop() {
-      proc.stdin.write("q\n");
-      await proc.stdin.flush();
-      await proc.exited;
+      await stopFfmpeg(proc);
     },
   };
 }
@@ -60,14 +58,10 @@ export async function startDualRecording(
     async stop() {
       await Promise.all([
         sysSession.stop(),
-        (async () => {
-          micProc.stdin.write("q\n");
-          await micProc.stdin.flush();
-          await micProc.exited;
-        })(),
+        stopFfmpeg(micProc),
       ]);
-      renameSync(micTmp, micPath);
-      renameSync(sysTmp, sysPath);
+      if (existsSync(micTmp)) renameSync(micTmp, micPath);
+      if (existsSync(sysTmp)) renameSync(sysTmp, sysPath);
     },
   };
 }
@@ -83,7 +77,14 @@ function spawnMicRecording(deviceIndex: number, filePath: string) {
       "-y",
       filePath,
     ],
-    { stderr: "pipe", stdout: "pipe", stdin: "pipe" }
+    { stderr: "pipe", stdout: "ignore", stdin: "ignore" }
   );
+}
+
+async function stopFfmpeg(proc: ReturnType<typeof Bun.spawn>): Promise<void> {
+  proc.kill("SIGTERM");
+  const timeout = setTimeout(() => proc.kill("SIGKILL"), 5_000);
+  await proc.exited;
+  clearTimeout(timeout);
 }
 

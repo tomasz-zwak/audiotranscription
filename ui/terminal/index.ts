@@ -4,11 +4,10 @@ import path from "node:path";
 import { listAudioDevices } from "../../src/devices";
 import { startDualRecording } from "../../src/recorder";
 import { buildSystemAudioCapture } from "../../src/system-audio/index";
-import { segmentsToText, mergeSegments, filterNoise, type Transcriber } from "../../src/transcribe";
-import { type Note, noteToRecord, msToOffset } from "../../src/notes";
-import { whisperCppTranscriber } from "../../src/transcribers/whisper-cpp";
-import { lumenWhisperTranscriber } from "../../src/transcribers/lumen-whisper";
+import { type Transcriber } from "../../src/transcribe";
+import { type Note, msToOffset } from "../../src/notes";
 import { loadSettings, saveSettings, type Settings, type Engine } from "../../src/settings";
+import { resolveTranscriber, runDualTranscriptionPipeline, runSingleTranscriptionPipeline } from "../../src/pipeline";
 import { pickAudioFile } from "./file-picker";
 
 const RECORDINGS_DIR = path.join(import.meta.dir, "..", "..", "recordings");
@@ -85,7 +84,7 @@ async function recordFlow(transcriber: Transcriber, settings: Settings) {
   await session.stop();
   stopSpinner.stop("Recording saved");
 
-  await transcribeDualAndDisplay(session.micPath, session.sysPath, tempName, transcriber, notes);
+  await runDualAndDisplay(session.micPath, session.sysPath, tempName, transcriber, notes);
   await renameFlow(tempName);
 }
 
@@ -98,7 +97,7 @@ async function existingFlow(transcriber: Transcriber) {
   if (!filePath) { clack.outro("No file selected"); process.exit(0); }
 
   clack.log.step(`Selected: ${path.relative(process.cwd(), filePath)}`);
-  await transcribeAndDisplay(filePath, transcriber);
+  await runSingleAndDisplay(filePath, transcriber);
   clack.outro("Done!");
 }
 
@@ -218,7 +217,7 @@ async function renameFlow(currentName: string) {
   }
 }
 
-async function transcribeDualAndDisplay(
+async function runDualAndDisplay(
   micPath: string,
   sysPath: string,
   baseName: string,
@@ -227,60 +226,17 @@ async function transcribeDualAndDisplay(
 ) {
   const spinner = clack.spinner();
   spinner.start("Transcribing mic + system audio");
-
-  const sysNormPath = sysPath.replace(/\.wav$/, "-norm.wav");
-  await normalizeForWhisper(sysPath, sysNormPath);
-
-  const [rawMic, rawSys] = await Promise.all([
-    transcriber.transcribe(micPath),
-    transcriber.transcribe(sysNormPath),
-  ]).finally(() => Bun.spawn(["rm", "-f", sysNormPath]));
-
-  const micSegments = filterNoise(rawMic).map((s) => ({ ...s, source: "mic" as const }));
-  const sysSegments = filterNoise(rawSys).map((s) => ({ ...s, source: "sys" as const }));
-
-  const segments = mergeSegments(micSegments, sysSegments);
-  const text = segmentsToText(segments);
-  const transcriptPath = path.join(RECORDINGS_DIR, `${baseName}.txt`);
-
-  const writes: Promise<unknown>[] = [
-    Bun.write(transcriptPath, text),
-    Bun.write(path.join(RECORDINGS_DIR, `${baseName}.json`), JSON.stringify(segments)),
-  ];
-
-  if (notes.length > 0) {
-    writes.push(
-      Bun.write(
-        path.join(RECORDINGS_DIR, `${baseName}.metadata.json`),
-        JSON.stringify(notes.map(noteToRecord), null, 2)
-      )
-    );
-  }
-
-  await Promise.all(writes);
-
+  const { text, transcriptPath } = await runDualTranscriptionPipeline(micPath, sysPath, baseName, RECORDINGS_DIR, transcriber, notes);
   spinner.stop(`Transcript saved → ${path.relative(process.cwd(), transcriptPath)}`);
   clack.note(text || "(no speech detected)", "Transcript");
 }
 
-async function transcribeAndDisplay(filePath: string, transcriber: Transcriber) {
+async function runSingleAndDisplay(filePath: string, transcriber: Transcriber) {
   const spinner = clack.spinner();
   spinner.start("Transcribing");
-  const segments = await transcriber.transcribe(filePath);
-  const text = segmentsToText(segments);
-  const transcriptPath = filePath.replace(/\.\w+$/, ".txt");
-
-  await Promise.all([
-    Bun.write(transcriptPath, text),
-    Bun.write(filePath.replace(/\.\w+$/, ".json"), JSON.stringify(segments)),
-  ]);
-
+  const { text, transcriptPath } = await runSingleTranscriptionPipeline(filePath, transcriber);
   spinner.stop(`Transcript saved → ${path.relative(process.cwd(), transcriptPath)}`);
   clack.note(text || "(no speech detected)", "Transcript");
-}
-
-function resolveTranscriber(engine: Engine): Transcriber {
-  return engine === "lumen-whisper" ? lumenWhisperTranscriber : whisperCppTranscriber;
 }
 
 function settingsHint(s: Settings): string {
@@ -357,10 +313,4 @@ function nextKeypress(): Promise<Buffer> {
   return new Promise((resolve) => process.stdin.once("data", resolve));
 }
 
-async function normalizeForWhisper(input: string, output: string): Promise<void> {
-  const proc = Bun.spawn(
-    ["ffmpeg", "-y", "-i", input, "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", output],
-    { stdout: "ignore", stderr: "ignore", stdin: "ignore" }
-  );
-  await proc.exited;
-}
+

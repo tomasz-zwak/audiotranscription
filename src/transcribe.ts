@@ -100,10 +100,68 @@ export function segmentsToText(segments: Segment[]): string {
   return blocks.map((b) => b.text.trim()).join(" ").trim();
 }
 
+function toMs(t: string): number {
+  const [h, m, s] = t.split(":").map(Number);
+  return ((h * 60 + m) * 60 + s) * 1000;
+}
+
 export function mergeSegments(a: Segment[], b: Segment[]): Segment[] {
-  const toMs = (t: string): number => {
-    const [h, m, s] = t.split(":").map(Number);
-    return ((h * 60 + m) * 60 + s) * 1000;
-  };
   return [...a, ...b].sort((x, y) => toMs(x.start) - toMs(y.start));
+}
+
+// ─── silence filtering ───────────────────────────────────────────────────────
+
+interface TimeRange { start: number; end: number; }
+
+async function detectSpeechRanges(
+  audioPath: string,
+  thresholdDb = -40,
+  minSilenceSeconds = 0.3
+): Promise<TimeRange[]> {
+  const proc = Bun.spawn(
+    [
+      "ffmpeg", "-i", audioPath,
+      "-af", `silencedetect=n=${thresholdDb}dB:d=${minSilenceSeconds}`,
+      "-f", "null", "/dev/null",
+    ],
+    { stdout: "ignore", stderr: "pipe", stdin: "ignore" }
+  );
+  const stderr = await new Response(proc.stderr).text();
+  await proc.exited;
+
+  const durationMatch = stderr.match(/Duration:\s*(\d+:\d+:[\d.]+)/);
+  const totalMs = durationMatch ? toMs(durationMatch[1]) : null;
+
+  const silenceStarts: number[] = [];
+  const silenceEnds: number[] = [];
+  for (const line of stderr.split("\n")) {
+    const s = line.match(/silence_start:\s*([\d.]+)/);
+    if (s) silenceStarts.push(parseFloat(s[1]) * 1000);
+    const e = line.match(/silence_end:\s*([\d.]+)/);
+    if (e) silenceEnds.push(parseFloat(e[1]) * 1000);
+  }
+
+  // Convert silence periods → speech periods.
+  const speech: TimeRange[] = [];
+  let pos = 0;
+  for (let i = 0; i < silenceStarts.length; i++) {
+    if (silenceStarts[i] > pos) speech.push({ start: pos, end: silenceStarts[i] });
+    pos = silenceEnds[i] ?? totalMs ?? Infinity;
+  }
+  if (totalMs !== null && pos < totalMs) speech.push({ start: pos, end: totalMs });
+
+  return speech;
+}
+
+export async function filterSilentSegments(
+  segments: Segment[],
+  audioPath: string
+): Promise<Segment[]> {
+  const speech = await detectSpeechRanges(audioPath);
+  if (speech.length === 0) return segments; // detection failed — pass through
+  return segments.filter((seg) => {
+    const s = toMs(seg.start);
+    const e = toMs(seg.end);
+    return speech.some((r) => s < r.end && e > r.start);
+  });
 }

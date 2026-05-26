@@ -4,64 +4,158 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'" />
-  <title>Audio Recorder</title>
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:" />
+  <title>Audio Transcription</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div id="app">
-    <header>
-      <div class="header-pill">Audio Recorder</div>
-    </header>
 
-    <main>
-      <!-- Loading state -->
-      <section id="state-loading" class="state hidden">
-        <div class="spinner" aria-label="Loading"></div>
-        <p class="status-text">Detecting audio devices…</p>
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <div class="sidebar-brand">Audio Transcription</div>
+      <div class="sidebar-nav">
+        <button class="nav-item" id="nav-record">
+          <span class="nav-icon">⏺</span>
+          <span>Record</span>
+        </button>
+        <button class="nav-item" id="nav-files">
+          <span class="nav-icon">📁</span>
+          <span>Files</span>
+        </button>
+        <button class="nav-item" id="nav-settings">
+          <span class="nav-icon">⚙</span>
+          <span>Settings</span>
+        </button>
+      </div>
+    </nav>
+
+    <!-- Main content -->
+    <main class="content">
+
+      <!-- Loading -->
+      <section id="state-loading" class="panel panel-center">
+        <div class="spinner"></div>
+        <p class="status-text">Starting up…</p>
       </section>
 
-      <!-- Error state -->
-      <section id="state-error" class="state hidden">
-        <p class="error-icon">!</p>
+      <!-- Error -->
+      <section id="state-error" class="panel panel-center hidden">
+        <div class="error-icon">!</div>
         <p id="error-message" class="error-text"></p>
-        <button id="btn-retry" class="btn btn-secondary">Retry</button>
+        <button id="btn-error-back" class="btn btn-secondary btn-sm">Back</button>
       </section>
 
-      <!-- Device selection state -->
-      <section id="state-select" class="state hidden">
-        <label for="device-select" class="field-label">Select input device</label>
+      <!-- Record idle -->
+      <section id="state-record-idle" class="panel panel-center hidden">
+        <button id="btn-record" class="record-btn">
+          <span class="record-btn-dot"></span>
+          <span class="record-btn-label">Record</span>
+        </button>
+        <p id="record-idle-hint" class="status-text"></p>
+      </section>
+
+      <!-- Device select (first run) -->
+      <section id="state-device-select" class="panel panel-center hidden">
+        <h2 class="page-title">Select microphone</h2>
+        <p class="page-hint">Saved for future sessions</p>
         <div class="select-wrapper">
           <select id="device-select" class="device-select" aria-label="Audio input device"></select>
-          <span class="select-arrow">&#8964;</span>
+          <span class="select-arrow">⌄</span>
         </div>
-        <button id="btn-start" class="btn btn-primary">Start Recording</button>
+        <button id="btn-start-recording" class="btn btn-primary">Start Recording</button>
+        <button id="btn-device-back" class="btn btn-ghost">Back</button>
       </section>
 
-      <!-- Recording state -->
-      <section id="state-recording" class="state hidden">
-        <div class="recording-indicator">
-          <span class="rec-dot" aria-label="Recording"></span>
-          <span class="rec-label">REC</span>
+      <!-- Active recording -->
+      <section id="state-recording" class="panel panel-recording hidden">
+        <div class="rec-top">
+          <div class="recording-indicator">
+            <span class="rec-dot"></span>
+            <span class="rec-label">REC</span>
+          </div>
+          <div id="timer" class="timer">00:00</div>
         </div>
-        <div id="timer" class="timer" aria-live="polite">00:00</div>
-        <p class="recording-hint">Recording in progress</p>
-        <button id="btn-stop" class="btn btn-danger">Stop Recording</button>
+
+        <div class="waveform-container">
+          <div class="waveform-row">
+            <span class="waveform-label">Mic</span>
+            <canvas id="waveform-mic" class="waveform-canvas"></canvas>
+          </div>
+          <div id="waveform-sys-row" class="waveform-row hidden">
+            <span class="waveform-label">Sys</span>
+            <canvas id="waveform-sys" class="waveform-canvas"></canvas>
+          </div>
+        </div>
+
+        <div class="rec-actions">
+          <button id="btn-add-note" class="btn btn-secondary btn-sm">+ Add note</button>
+          <button id="btn-stop" class="btn btn-danger btn-sm">■ Stop</button>
+        </div>
+
+        <div id="note-form" class="note-form hidden">
+          <input id="note-input" type="text" class="note-input" placeholder="Enter note…" autocomplete="off" />
+          <div class="note-form-actions">
+            <button id="btn-note-save" class="btn btn-primary btn-sm">Save</button>
+            <button id="btn-note-cancel" class="btn btn-ghost btn-sm">Cancel</button>
+          </div>
+        </div>
+
+        <div id="notes-list" class="notes-list"></div>
       </section>
 
-      <!-- Finalizing state -->
-      <section id="state-finalizing" class="state hidden">
-        <div class="spinner" aria-label="Finalizing"></div>
+      <!-- Stopping -->
+      <section id="state-stopping" class="panel panel-center hidden">
+        <div class="spinner"></div>
         <p class="status-text">Finalizing recording…</p>
       </section>
 
-      <!-- Done state -->
-      <section id="state-done" class="state hidden">
-        <p class="done-icon">&#10003;</p>
-        <p class="done-label">Recording saved</p>
-        <p id="saved-path" class="saved-path"></p>
-        <button id="btn-new" class="btn btn-secondary">New Recording</button>
+      <!-- Transcribing -->
+      <section id="state-transcribing" class="panel panel-center hidden">
+        <div class="spinner"></div>
+        <p id="transcription-progress" class="status-text">Transcribing…</p>
       </section>
+
+      <!-- Done -->
+      <section id="state-done" class="panel panel-done hidden">
+        <div class="done-header">
+          <div class="done-badge">
+            <span class="done-icon">✓</span>
+            <span class="done-label">Transcript ready</span>
+          </div>
+          <div id="rename-area" class="rename-area hidden">
+            <input id="rename-input" type="text" class="rename-input" />
+            <button id="btn-rename" class="btn btn-secondary btn-sm">Rename</button>
+          </div>
+        </div>
+        <pre id="transcript-text" class="transcript-box"></pre>
+        <p id="transcript-path" class="saved-path"></p>
+        <button id="btn-done-back" class="btn btn-ghost btn-sm">⏺ New Recording</button>
+      </section>
+
+      <!-- Files -->
+      <section id="state-files" class="panel panel-files hidden">
+        <div class="files-header">
+          <h2 class="page-title">Recordings</h2>
+          <button id="btn-refresh-files" class="btn btn-ghost btn-sm">Refresh</button>
+        </div>
+        <div id="files-list" class="files-list"></div>
+        <p id="files-empty" class="files-empty hidden">No recordings yet</p>
+      </section>
+
+      <!-- Settings -->
+      <section id="state-settings" class="panel panel-settings hidden">
+        <h2 class="page-title">Settings</h2>
+        <div class="settings-field">
+          <label class="field-label" for="settings-device-select">Microphone</label>
+          <div class="select-wrapper">
+            <select id="settings-device-select" class="device-select"></select>
+            <span class="select-arrow">⌄</span>
+          </div>
+        </div>
+        <button id="btn-settings-save" class="btn btn-primary">Save</button>
+      </section>
+
     </main>
   </div>
 
